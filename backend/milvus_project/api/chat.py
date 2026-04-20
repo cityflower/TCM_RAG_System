@@ -1,6 +1,7 @@
 # backend/api/chat.py
 import os
 import uuid
+import json
 from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
@@ -90,11 +91,23 @@ async def chat_with_tcm(
     
     # 包装成生成器，FastAPI 才能一段一段地发给前端
     def stream_generator():
-        # 如果咱们想把参考资料也发给前端，可以在这里偷偷拼凑一下
-        # yield "【系统提示：开始为您解答】\n\n"
+        # 发送参考资料给前端（溯源数据）
+        refs_data = {
+            "type": "references",
+            "content": {"text_chunks": best_docs}
+        }
+        yield f"data: {json.dumps(refs_data, ensure_ascii=False)}\n\n"
         
         for chunk in generate_rag_response_stream(query, best_docs, image_info):
-            yield chunk
+            # 将普通文本打包成前端规定的 JSON 格式
+            chunk_data = {
+                "type": "text",
+                "content": chunk
+            }
+            yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
+            
+        # 补上结束信号
+        yield "data: [DONE]\n\n"
 
     # 返回 Server-Sent Events 流式响应！
     return StreamingResponse(stream_generator(), media_type="text/event-stream")

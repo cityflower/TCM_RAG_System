@@ -36,11 +36,10 @@ def generate_rag_response_stream(query, best_docs, image_info=None):
     # ==========================================
     try:
         response = client.chat.completions.create(
-            model="local-model", # 💡 市花注意：在 LM Studio 中，模型名填 "local-model" 即可万能适配
+            model="qwen2.5-vl-7b-instruct", # 💡 已经为你切换为 qwen2.5-vl-7b-instruct
             messages=messages,
             temperature=0.7,
             stream=True
-            # 已经去掉了 extra_body，让它自由思考，我们在下面用代码拦截！
         )
 
         is_thinking = False # 状态标记：记录模型当前是否处于“深度思考”模式

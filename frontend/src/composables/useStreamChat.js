@@ -88,7 +88,7 @@ export function useStreamChat() {
       {
         query: query.trim() || '请根据图片识别这味草药',
         session_id: sessionId.value,
-        image_base64: imageBase64 ? imageBase64.split(',')[1] : null, // 去除 data URL 头部
+        image_file: imageFile, 
       },
       // onChunk: 接收文本片段
       (chunk) => {
