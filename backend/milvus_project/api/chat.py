@@ -1,4 +1,3 @@
-# backend/api/chat.py
 import os
 import uuid
 import json
@@ -7,8 +6,9 @@ from fastapi.responses import StreamingResponse
 
 # 把咱们前面练成绝世武功的四大天王全都请出来
 from milvus_project.core.embedding import get_multimodal_embedding
-from milvus_project.core.milvus_client import milvus_client, KNOWLEDGE_COLLECTION
+from milvus_project.core.retrieval import search_knowledge_by_vector
 from milvus_project.core.rerank import rerank_results
+from milvus_project.core.reference_formatter import split_reference_docs
 from milvus_project.core.llm import generate_rag_response_stream
 from milvus_project.core.minio_client import upload_image_to_minio
 
@@ -58,30 +58,24 @@ async def chat_with_tcm(
     # 步骤 3：Milvus 大库捞针 (粗筛)
     # ==========================================
     print("🗄️ 正在知识库中进行初步匹配...")
-    search_res = milvus_client.search(
-        collection_name=KNOWLEDGE_COLLECTION,
-        data=[query_vector],
-        anns_field="dense_vector",
-        limit=10, # 先捞 10 条出来
-        output_fields=["content", "data_type", "source", "metadata"]
-    )
-    
-    # 把捞出来的结果整理成一个干净的字典列表
-    retrieved_docs = []
-    if search_res and len(search_res[0]) > 0:
-        retrieved_docs = [hit['entity'] for hit in search_res[0]]
+    retrieved_docs = search_knowledge_by_vector(query_vector, limit=20)
 
     # ==========================================
     # 步骤 4：铁面裁判重排 (精筛)
     # ==========================================
     print("⚖️ 裁判正在进行严苛打分...")
     # 把图文和捞出来的 10 条古籍交给裁判，只留最精华的 3 条！
+    # 图片问诊时，Milvus 已经用图文向量做了多模态召回；reranker 在本地
+    # webp/图片输入上不稳定，因此图片查询直接使用召回排序更稳。
+    enable_rerank = local_img_path is None
     best_docs = rerank_results(
         query_text=query, 
         query_image_path=local_img_path, 
         retrieved_docs=retrieved_docs, 
-        top_k=3
+        top_k=8,
+        enable_rerank=enable_rerank,
     )
+    text_chunks, image_results = split_reference_docs(best_docs)
 
     # ==========================================
     # 步骤 5：老中医接诊 (流式输出给前端)
@@ -94,11 +88,19 @@ async def chat_with_tcm(
         # 发送参考资料给前端（溯源数据）
         refs_data = {
             "type": "references",
-            "content": {"text_chunks": best_docs}
+            "content": {
+                "text_chunks": text_chunks,
+                "image_results": image_results,
+            }
         }
         yield f"data: {json.dumps(refs_data, ensure_ascii=False)}\n\n"
         
-        for chunk in generate_rag_response_stream(query, best_docs, image_info):
+        for chunk in generate_rag_response_stream(
+            query,
+            best_docs,
+            image_info,
+            image_results=image_results,
+        ):
             # 将普通文本打包成前端规定的 JSON 格式
             chunk_data = {
                 "type": "text",

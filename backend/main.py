@@ -7,6 +7,7 @@ import uvicorn
 from milvus_project.core.minio_client import init_minio
 from milvus_project.api.chat import router as chat_router
 from milvus_project.api.knowledge import router as knowledge_router
+from milvus_project.api.search import router as search_router
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ app = FastAPI(title="中医多模态 RAG 系统 API", version="2.0.0")
 app.include_router(chat_router, prefix="/api")
 
 app.include_router(knowledge_router, prefix="/api")
+app.include_router(search_router, prefix="/api")
 
 @app.on_event("startup")
 async def startup_event():

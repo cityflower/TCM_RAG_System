@@ -14,18 +14,21 @@
     </div>
 
     <!-- 相关度分数 -->
-    <div v-if="chunk.score" class="flex items-center gap-1 mb-2">
+    <div v-if="displayScore !== null" class="flex items-center gap-1 mb-2">
       <div class="flex-1 bg-gray-100 rounded-full h-1">
         <div
           class="bg-gradient-to-r from-tcm-400 to-tcm-600 h-1 rounded-full transition-all duration-500"
-          :style="{ width: Math.min(chunk.score * 100, 100) + '%' }"
+          :style="{ width: (displayScore * 100) + '%' }"
         ></div>
       </div>
-      <span class="text-xs text-gray-400">{{ (chunk.score * 100).toFixed(0) }}%</span>
+      <span class="text-xs text-gray-400">{{ (displayScore * 100).toFixed(0) }}%</span>
     </div>
 
     <!-- 原文内容 -->
-    <p class="text-xs text-gray-600 leading-relaxed line-clamp-4 group-hover:line-clamp-none transition-all duration-300">
+    <p
+      class="text-xs text-gray-600 leading-relaxed transition-all duration-300"
+      :class="expanded ? 'line-clamp-none' : 'line-clamp-4 group-hover:line-clamp-none'"
+    >
       {{ chunk.content || chunk.text || '暂无内容' }}
     </p>
 
@@ -41,7 +44,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = defineProps({
   chunk: { type: Object, required: true },
@@ -49,4 +52,12 @@ const props = defineProps({
 })
 
 const expanded = ref(false)
+
+const displayScore = computed(() => {
+  const value = props.chunk.score ?? props.chunk.rerank_score ?? props.chunk.retrieval_score
+  if (value === undefined || value === null || value === '') return null
+  const score = Number(value)
+  if (Number.isNaN(score)) return null
+  return Math.max(0, Math.min(score, 1))
+})
 </script>

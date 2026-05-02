@@ -1,56 +1,124 @@
-# backend/milvus_project/core/rerank.py
 import os
+import logging
+from typing import Any
+
 import torch
 from src.models.qwen3_vl_reranker import Qwen3VLReranker
+from milvus_project.core.retrieval import display_score, safe_float
 
 MODEL_ID = "./models/Qwen3-VL-Reranker-2B"
+logger = logging.getLogger(__name__)
+RERANK_DOCUMENT_IMAGES = os.getenv("TCM_RERANK_DOCUMENT_IMAGES", "0") == "1"
 
-print("⚖️ 正在通过阿里官方专属通道加载 Qwen3-VL 多模态重排裁判...")
-model = Qwen3VLReranker(
-    model_name_or_path=MODEL_ID,
-    device_map="mps",
-    torch_dtype=torch.bfloat16      # 👈 开启半精度加速
-)
+_model: Qwen3VLReranker | None = None
 
-def rerank_results(query_text: str, query_image_path: str, retrieved_docs: list, top_k: int = 3) -> list:
-    """终极多模态重排裁判 (提取云相册 + 逐条防崩版)"""
+
+def get_reranker() -> Qwen3VLReranker:
+    global _model
+    if _model is None:
+        logger.info("Loading Qwen3-VL reranker from %s", MODEL_ID)
+        _model = Qwen3VLReranker(
+            model_name_or_path=MODEL_ID,
+            device_map="mps",
+            torch_dtype=torch.bfloat16,
+        )
+    return _model
+
+
+def _doc_image_url(doc: dict[str, Any]) -> str:
+    metadata = doc.get("metadata") or {}
+    if isinstance(metadata, dict):
+        return metadata.get("image_url") or ""
+    return ""
+
+
+def _fallback_results(
+    retrieved_docs: list[dict[str, Any]],
+    top_k: int,
+    reason: str,
+    status: str = "fallback",
+) -> list[dict[str, Any]]:
+    logger.warning("Rerank fallback: %s", reason)
+    docs = []
+    for doc in retrieved_docs:
+        item = dict(doc)
+        retrieval_score = safe_float(item.get("retrieval_score", item.get("score")))
+        item["rerank_score"] = None
+        item["score"] = display_score(retrieval_score)
+        item["rerank_status"] = status
+        if status == "fallback":
+            item["rerank_error"] = reason
+        docs.append(item)
+    docs.sort(key=lambda x: safe_float(x.get("retrieval_score", x.get("score"))), reverse=True)
+    return docs[:top_k]
+
+
+def rerank_results(
+    query_text: str,
+    query_image_path: str | None,
+    retrieved_docs: list[dict[str, Any]],
+    top_k: int = 3,
+    enable_rerank: bool = True,
+) -> list[dict[str, Any]]:
+    """Rerank Milvus hits and expose a frontend-friendly score field."""
     if not retrieved_docs:
         return []
 
-    # 1. 组装提问 (哪怕只发图片，也给它垫一句话防报错)
+    if not enable_rerank:
+        return _fallback_results(retrieved_docs, top_k, "rerank disabled", status="disabled")
+
+    try:
+        model = get_reranker()
+    except Exception as exc:
+        return _fallback_results(retrieved_docs, top_k, f"model load failed: {exc}")
+
     query_dict = {"text": query_text if query_text else "请帮我看看这个。"}
     if query_image_path and os.path.exists(query_image_path):
         query_dict["image"] = query_image_path
 
-    # 2. 逐一打分！(彻底破解底层批量处理图文的 Bug)
+    reranked_docs = []
     for doc in retrieved_docs:
-        doc_content = doc.get('content', '')
-        # 🌟 关键：把存进去的 MinIO 链接给挖出来！
-        metadata = doc.get('metadata', {})
-        image_url = metadata.get('image_url', '')
+        item = dict(doc)
+        doc_content = item.get("content") or ""
+        image_url = _doc_image_url(item)
 
-        # 组装这篇古籍的专属格式
         doc_input = {"text": doc_content if doc_content else "图片资料"}
-        if image_url:
-            # 官方大模型非常聪明，直接喂给它 MinIO 的网址它也能看懂！
-            doc_input["image"] = image_url  
+        # 候选文档图片已经在 Milvus 多模态召回阶段参与了相似度计算。
+        # 部分 webp/本地 MinIO 图片继续传入 reranker 会触发模型侧张量索引错误，
+        # 因此默认只用文档文字描述重排；需要实验时可设置环境变量打开。
+        if image_url and RERANK_DOCUMENT_IMAGES:
+            doc_input["image"] = image_url
 
-        # 每次只传 1 篇进去，大模型绝不崩溃！
         inputs = {
             "query": query_dict,
-            "documents": [doc_input]
+            "documents": [doc_input],
         }
 
         try:
             scores = model.process(inputs)
-            doc['rerank_score'] = scores[0].item() if hasattr(scores[0], 'item') else scores[0]
-        except Exception as e:
-            print(f"⚠️ 裁判打分异常: {e}")
-            doc['rerank_score'] = -999.0
+            rerank_score = scores[0].item() if hasattr(scores[0], "item") else scores[0]
+            rerank_score = safe_float(rerank_score)
+            item["rerank_score"] = rerank_score
+            item["score"] = display_score(rerank_score)
+            item["rerank_status"] = "ok"
+        except Exception as exc:
+            retrieval_score = safe_float(item.get("retrieval_score", item.get("score")))
+            item["rerank_score"] = None
+            item["score"] = display_score(retrieval_score)
+            item["rerank_status"] = "fallback"
+            item["rerank_error"] = str(exc)
+            logger.warning("Rerank failed for source=%s: %s", item.get("source"), exc)
+        reranked_docs.append(item)
 
-    # 3. 按得分从高到低排序，截取前 top_k
-    retrieved_docs.sort(key=lambda x: x['rerank_score'], reverse=True)
-    return retrieved_docs[:top_k]
+    reranked_docs.sort(
+        key=lambda x: (
+            safe_float(x.get("rerank_score"), -1.0)
+            if x.get("rerank_score") is not None
+            else safe_float(x.get("retrieval_score", x.get("score")))
+        ),
+        reverse=True,
+    )
+    return reranked_docs[:top_k]
 
 # ==========================================
 # 🧪 随堂小测试 保持原样即可
@@ -76,4 +144,4 @@ if __name__ == "__main__":
     
     print("\n🏆 裁判最终选出的最优解：")
     for res in best_results:
-        print(f"得分: {res.get('rerank_score', 0):.4f} | 内容: {res.get('content')}")
+        print(f"得分: {res.get('score', 0):.4f} | 内容: {res.get('content')}")

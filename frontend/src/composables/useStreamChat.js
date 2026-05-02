@@ -1,6 +1,7 @@
-import { ref, nextTick } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { streamChat } from '@/api/chat.js'
 import { fileToBase64 } from '@/api/upload.js'
+import { readStorage, writeStorage } from '@/utils/storage.js'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 import DOMPurify from 'dompurify'
@@ -20,15 +21,129 @@ marked.setOptions({
  * 核心聊天 composable
  */
 export function useStreamChat() {
-  const messages = ref([])     // 消息列表
-  const isLoading = ref(false) // 是否正在等待/流式输出
-  const references = ref({     // 溯源数据
-    textChunks: [],
-    imageResults: [],
-  })
-  const sessionId = ref(null)  // 会话 ID
+  const STORAGE_KEY = 'tcm.chat.sessions.v1'
+  const ACTIVE_KEY = 'tcm.chat.activeSessionId.v1'
+  const HISTORY_LIMIT = 30
 
-  let abortController = null   // 用于中断请求
+  function createSession() {
+    const id = `local_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
+    return {
+      id,
+      backendSessionId: null,
+      title: '新问诊',
+      messages: [],
+      references: { textChunks: [], imageResults: [] },
+      isLoading: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  function hydrateSessions() {
+    const cached = readStorage(STORAGE_KEY, [])
+    if (!Array.isArray(cached) || cached.length === 0) return [createSession()]
+
+    return cached.map((session) => ({
+      ...createSession(),
+      ...session,
+      messages: Array.isArray(session.messages)
+        ? session.messages.map((msg) => ({
+            ...msg,
+            streaming: false,
+            time: msg.time || session.updatedAt || new Date().toISOString(),
+          }))
+        : [],
+      references: session.references || { textChunks: [], imageResults: [] },
+      isLoading: false,
+    }))
+  }
+
+  function getSessionTitle(session) {
+    const firstUserMessage = session.messages.find((msg) => msg.role === 'user' && msg.text)
+    if (!firstUserMessage) return '新问诊'
+    return firstUserMessage.text.replace(/\s+/g, ' ').slice(0, 24)
+  }
+
+  function isBlankSession(session) {
+    return !session?.messages?.length && !session?.backendSessionId
+  }
+
+  const sessions = ref(hydrateSessions())
+  const cachedActiveId = localStorage.getItem(ACTIVE_KEY)
+  const activeSessionId = ref(
+    sessions.value.some((session) => session.id === cachedActiveId)
+      ? cachedActiveId
+      : sessions.value[0].id
+  )
+
+  const activeSession = computed(() => {
+    return sessions.value.find((session) => session.id === activeSessionId.value) || sessions.value[0]
+  })
+
+  const messages = computed(() => activeSession.value?.messages || [])
+  const references = computed(() => activeSession.value?.references || { textChunks: [], imageResults: [] })
+  const sessionId = computed(() => activeSession.value?.backendSessionId || null)
+  const isLoading = computed(() => Boolean(activeSession.value?.isLoading))
+  const chatHistory = computed(() => (
+    sessions.value
+      .filter((session) => session.messages.length > 0)
+      .map((session) => ({
+        id: session.id,
+        title: session.title || getSessionTitle(session),
+        updatedAt: session.updatedAt,
+        messageCount: session.messages.length,
+        isLoading: Boolean(session.isLoading),
+      }))
+      .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+  ))
+
+  const abortControllers = new Map() // 按会话保存中断器
+  let persistTimer = null
+
+  function persistSessions() {
+    const data = sessions.value
+      .filter((session) => session.messages.length > 0 || session.id === activeSessionId.value)
+      .map((session) => ({
+        ...session,
+        isLoading: false,
+        messages: session.messages.map((msg) => ({ ...msg, streaming: false })),
+      }))
+      .slice()
+      .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+      .slice(0, HISTORY_LIMIT)
+    writeStorage(STORAGE_KEY, data)
+    localStorage.setItem(ACTIVE_KEY, activeSessionId.value)
+  }
+
+  function schedulePersist() {
+    clearTimeout(persistTimer)
+    persistTimer = setTimeout(persistSessions, 250)
+  }
+
+  watch(sessions, schedulePersist, { deep: true })
+  watch(activeSessionId, schedulePersist)
+
+  function touchSession(session) {
+    session.updatedAt = new Date().toISOString()
+    session.title = getSessionTitle(session)
+  }
+
+  function setActiveSession(id) {
+    if (!sessions.value.some((session) => session.id === id)) return
+    activeSessionId.value = id
+  }
+
+  function ensureActiveSession() {
+    if (activeSession.value) return activeSession.value
+    const session = createSession()
+    sessions.value.unshift(session)
+    activeSessionId.value = session.id
+    return session
+  }
+
+  function shouldScrollSession(sessionId) {
+    return activeSessionId.value === sessionId
+  }
 
   /**
    * 将 Markdown 字符串渲染成安全 HTML
@@ -45,7 +160,9 @@ export function useStreamChat() {
    * @param {Function} scrollToBottomFn - 触发滚动的回调
    */
   async function sendMessage(query, imageFile = null, scrollToBottomFn = null) {
-    if (isLoading.value || (!query.trim() && !imageFile)) return
+    const currentSession = ensureActiveSession()
+    if (currentSession.isLoading || (!query.trim() && !imageFile)) return
+    const currentSessionId = currentSession.id
 
     // 构建图片信息（预览用）
     let imagePreview = null
@@ -56,7 +173,7 @@ export function useStreamChat() {
     }
 
     // 添加用户消息
-    messages.value.push({
+    currentSession.messages.push({
       id: Date.now(),
       role: 'user',
       text: query.trim(),
@@ -65,11 +182,11 @@ export function useStreamChat() {
     })
 
     // 清空溯源面板
-    references.value = { textChunks: [], imageResults: [] }
+    currentSession.references = { textChunks: [], imageResults: [] }
 
     // 添加 AI 占位消息（流式填充）
     const aiMsgId = Date.now() + 1
-    messages.value.push({
+    currentSession.messages.push({
       id: aiMsgId,
       role: 'assistant',
       text: '',
@@ -77,17 +194,18 @@ export function useStreamChat() {
       streaming: true,
       time: new Date(),
     })
+    touchSession(currentSession)
 
-    isLoading.value = true
+    currentSession.isLoading = true
     await nextTick()
-    scrollToBottomFn?.()
+    if (shouldScrollSession(currentSessionId)) scrollToBottomFn?.()
 
-    const aiMsg = messages.value.find(m => m.id === aiMsgId)
+    const aiMsg = currentSession.messages.find(m => m.id === aiMsgId)
 
-    abortController = streamChat(
+    const controller = streamChat(
       {
         query: query.trim() || '请根据图片识别这味草药',
-        session_id: sessionId.value,
+        session_id: currentSession.backendSessionId,
         image_file: imageFile, 
       },
       // onChunk: 接收文本片段
@@ -95,13 +213,15 @@ export function useStreamChat() {
         if (!aiMsg) return
         aiMsg.text += chunk
         aiMsg.html = renderMarkdown(aiMsg.text)
-        scrollToBottomFn?.()
+        touchSession(currentSession)
+        if (shouldScrollSession(currentSessionId)) scrollToBottomFn?.()
       },
       // onReferences: 接收溯源数据
       (refs) => {
-        if (refs.session_id) sessionId.value = refs.session_id
-        if (refs.text_chunks) references.value.textChunks = refs.text_chunks
-        if (refs.image_results) references.value.imageResults = refs.image_results
+        if (refs.session_id) currentSession.backendSessionId = refs.session_id
+        if (refs.text_chunks) currentSession.references.textChunks = refs.text_chunks
+        if (refs.image_results) currentSession.references.imageResults = refs.image_results
+        touchSession(currentSession)
       },
       // onDone
       () => {
@@ -109,8 +229,10 @@ export function useStreamChat() {
           aiMsg.streaming = false
           aiMsg.html = renderMarkdown(aiMsg.text)
         }
-        isLoading.value = false
-        scrollToBottomFn?.()
+        currentSession.isLoading = false
+        abortControllers.delete(currentSessionId)
+        touchSession(currentSession)
+        if (shouldScrollSession(currentSessionId)) scrollToBottomFn?.()
       },
       // onError
       (err) => {
@@ -119,21 +241,43 @@ export function useStreamChat() {
           aiMsg.html = `<p class="text-red-500">⚠️ 请求失败：${err.message}</p>`
           aiMsg.streaming = false
         }
-        isLoading.value = false
+        currentSession.isLoading = false
+        abortControllers.delete(currentSessionId)
+        touchSession(currentSession)
       }
     )
+    abortControllers.set(currentSessionId, controller)
   }
 
   /**
    * 中断当前流式请求
    */
   function abortChat() {
-    abortController?.abort()
-    isLoading.value = false
-    const lastMsg = messages.value[messages.value.length - 1]
+    const session = activeSession.value
+    if (!session) return
+
+    abortControllers.get(session.id)?.abort()
+    abortControllers.delete(session.id)
+    session.isLoading = false
+    const lastMsg = session.messages[session.messages.length - 1]
     if (lastMsg?.role === 'assistant' && lastMsg.streaming) {
       lastMsg.streaming = false
     }
+    touchSession(session)
+  }
+
+  function abortSession(id) {
+    const session = sessions.value.find((item) => item.id === id)
+    if (!session) return
+
+    abortControllers.get(id)?.abort()
+    abortControllers.delete(id)
+    session.isLoading = false
+    const lastMsg = session.messages[session.messages.length - 1]
+    if (lastMsg?.role === 'assistant' && lastMsg.streaming) {
+      lastMsg.streaming = false
+    }
+    touchSession(session)
   }
 
   /**
@@ -141,9 +285,33 @@ export function useStreamChat() {
    */
   function clearChat() {
     abortChat()
-    messages.value = []
-    references.value = { textChunks: [], imageResults: [] }
-    sessionId.value = null
+    const session = ensureActiveSession()
+    session.messages = []
+    session.references = { textChunks: [], imageResults: [] }
+    session.backendSessionId = null
+    session.title = '新问诊'
+    touchSession(session)
+  }
+
+  function newChat() {
+    const blankSession = sessions.value.find((session) => isBlankSession(session))
+    if (blankSession) {
+      activeSessionId.value = blankSession.id
+      return
+    }
+
+    const session = createSession()
+    sessions.value.unshift(session)
+    activeSessionId.value = session.id
+  }
+
+  function deleteSession(id) {
+    abortSession(id)
+    const nextSessions = sessions.value.filter((session) => session.id !== id)
+    sessions.value = nextSessions.length > 0 ? nextSessions : [createSession()]
+    if (activeSessionId.value === id) {
+      activeSessionId.value = sessions.value[0].id
+    }
   }
 
   return {
@@ -151,9 +319,14 @@ export function useStreamChat() {
     isLoading,
     references,
     sessionId,
+    activeSessionId,
+    chatHistory,
     sendMessage,
     abortChat,
     clearChat,
+    newChat,
+    setActiveSession,
+    deleteSession,
     renderMarkdown,
   }
 }

@@ -4,8 +4,12 @@
     <!-- ======== 左侧边栏 ======== -->
     <Sidebar
       :active-view="activeView"
+      :active-session-id="activeSessionId"
+      :chat-history="chatHistory"
       @switch-view="switchView"
       @new-chat="handleNewChat"
+      @select-chat="handleSelectChat"
+      @delete-chat="handleDeleteChat"
     />
 
     <!-- ======== 右侧主工作区 ======== -->
@@ -25,8 +29,8 @@
           <div class="flex items-center gap-3">
             <!-- 连接状态 -->
             <div class="flex items-center gap-1.5">
-              <span :class="['w-2 h-2 rounded-full', isLoading ? 'bg-amber-400 animate-pulse' : 'bg-green-400']"></span>
-              <span class="text-xs text-gray-500">{{ isLoading ? '生成中…' : '就绪' }}</span>
+              <span :class="['w-2 h-2 rounded-full', activeChatLoading ? 'bg-amber-400 animate-pulse' : 'bg-green-400']"></span>
+              <span class="text-xs text-gray-500">{{ activeChatLoading ? '生成中…' : '就绪' }}</span>
             </div>
 
             <!-- 会话 ID -->
@@ -62,7 +66,8 @@
             <div class="relative flex-shrink-0">
               <ChatInput
                 ref="chatInputRef"
-                :is-loading="isLoading"
+                :is-loading="activeChatLoading"
+                :draft-key="`chat-draft-${activeSessionId}`"
                 @send="handleSend"
                 @abort="abortChat"
               />
@@ -74,7 +79,7 @@
             <ReferencePanel
               :text-chunks="references.textChunks"
               :image-results="references.imageResults"
-              :is-loading="isLoading"
+              :is-loading="activeChatLoading"
             />
           </div>
         </div>
@@ -83,6 +88,11 @@
       <!-- ====== 视图 B：知识库管理 ====== -->
       <template v-else-if="activeView === 'knowledge'">
         <KnowledgeManager />
+      </template>
+
+      <!-- ====== 视图 C：症状辨证 ====== -->
+      <template v-else-if="activeView === 'differentiation'">
+        <SymptomDifferentiation v-show="activeView === 'differentiation'" />
       </template>
 
     </div>
@@ -96,13 +106,14 @@ import ChatBox from '@/components/ChatBox.vue'
 import ChatInput from '@/components/ChatInput.vue'
 import ReferencePanel from '@/components/ReferencePanel.vue'
 import KnowledgeManager from '@/components/KnowledgeManager.vue'
+import SymptomDifferentiation from '@/components/SymptomDifferentiation.vue'
 import { useStreamChat } from '@/composables/useStreamChat.js'
 
 const chatBoxRef = ref(null)
 const chatInputRef = ref(null)
 
 // 视图切换
-const activeView = ref(localStorage.getItem('activeView') || 'chat') // 'chat' | 'knowledge'
+const activeView = ref(localStorage.getItem('activeView') || 'chat') // 'chat' | 'knowledge' | 'differentiation'
 
 function switchView(view) {
   activeView.value = view
@@ -110,7 +121,20 @@ function switchView(view) {
 }
 
 // 聊天逻辑
-const { messages, isLoading, references, sessionId, sendMessage, abortChat, clearChat } = useStreamChat()
+const {
+  messages,
+  references,
+  sessionId,
+  isLoading: activeChatLoading,
+  activeSessionId,
+  chatHistory,
+  sendMessage,
+  abortChat,
+  clearChat,
+  newChat,
+  setActiveSession,
+  deleteSession,
+} = useStreamChat()
 
 function handleSend({ text, imageFile }) {
   sendMessage(text, imageFile, () => chatBoxRef.value?.scrollToBottom())
@@ -129,7 +153,18 @@ function handleClear() {
 }
 
 function handleNewChat() {
-  activeView.value = 'chat'
-  clearChat()
+  switchView('chat')
+  newChat()
+}
+
+function handleSelectChat(id) {
+  switchView('chat')
+  setActiveSession(id)
+}
+
+function handleDeleteChat(id) {
+  if (confirm('确定要删除这条历史会话吗？')) {
+    deleteSession(id)
+  }
 }
 </script>

@@ -34,6 +34,17 @@
       </button>
       <button
         class="sidebar-nav-item"
+        :class="{ 'sidebar-nav-item--active': activeView === 'differentiation' }"
+        @click="$emit('switch-view', 'differentiation')"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M9 12l2 2 4-4M7 4h10a2 2 0 012 2v14l-4-2-4 2-4-2-4 2V6a2 2 0 012-2z" />
+        </svg>
+        <span>症状辨证</span>
+      </button>
+      <button
+        class="sidebar-nav-item"
         :class="{ 'sidebar-nav-item--active': activeView === 'knowledge' }"
         @click="$emit('switch-view', 'knowledge')"
       >
@@ -52,13 +63,37 @@
         <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">历史会话</span>
       </div>
       <div class="sidebar-history-list scrollbar-thin">
-        <div class="sidebar-history-empty">
+        <div v-if="chatHistory.length === 0" class="sidebar-history-empty">
           <svg class="w-5 h-5 text-gray-300 mx-auto mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
               d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <p class="text-xs text-gray-300">暂无历史记录</p>
-          <p class="text-xs text-gray-300 mt-0.5">会话存储功能即将上线</p>
+          <p class="text-xs text-gray-300 mt-0.5">开始问诊后会自动保存</p>
+        </div>
+
+        <div v-else class="sidebar-history-items">
+          <div
+            v-for="item in chatHistory"
+            :key="item.id"
+            class="sidebar-history-item"
+            :class="{ 'sidebar-history-item--active': item.id === activeSessionId }"
+          >
+            <button class="sidebar-history-main" @click="$emit('select-chat', item.id)">
+              <span class="sidebar-history-title">{{ item.title }}</span>
+              <span class="sidebar-history-meta">
+                <span v-if="item.isLoading" class="sidebar-history-dot"></span>
+                {{ item.isLoading ? '生成中' : formatHistoryTime(item.updatedAt) }}
+              </span>
+            </button>
+            <button
+              class="sidebar-history-delete"
+              title="删除会话"
+              @click.stop="$emit('delete-chat', item.id)"
+            >
+              ×
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -79,7 +114,20 @@
 <script setup>
 defineProps({
   activeView: { type: String, default: 'chat' },
+  activeSessionId: { type: String, default: '' },
+  chatHistory: { type: Array, default: () => [] },
 })
 
-defineEmits(['switch-view', 'new-chat'])
+defineEmits(['switch-view', 'new-chat', 'select-chat', 'delete-chat'])
+
+function formatHistoryTime(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  const now = new Date()
+  const isToday = date.toDateString() === now.toDateString()
+  if (isToday) {
+    return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
+  }
+  return `${date.getMonth() + 1}/${date.getDate()}`
+}
 </script>

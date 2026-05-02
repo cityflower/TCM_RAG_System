@@ -1,6 +1,7 @@
 # backend/core/minio_client.py
 import os
 import logging
+import mimetypes
 from minio import Minio
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,13 @@ def init_minio():
 def upload_image_to_minio(local_file_path: str, file_name: str) -> str:
     """把本地图片上传到 MinIO，并返回专属下载链接"""
     try:
-        minio_client.fput_object(BUCKET_NAME, file_name, local_file_path)
+        content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        minio_client.fput_object(
+            BUCKET_NAME,
+            file_name,
+            local_file_path,
+            content_type=content_type,
+        )
         # 组装出前端可以直接访问的图片 URL
         url = f"http://{MINIO_ENDPOINT}/{BUCKET_NAME}/{file_name}"
         return url

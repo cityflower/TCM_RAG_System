@@ -106,10 +106,12 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
+import { nextTick, ref, watch } from 'vue'
+import { readStorage, removeStorage, writeStorage } from '@/utils/storage.js'
 
 const props = defineProps({
   isLoading: { type: Boolean, default: false },
+  draftKey: { type: String, default: 'chat-draft' },
 })
 
 const emit = defineEmits(['send', 'abort'])
@@ -120,6 +122,24 @@ const imagePreview = ref(null)
 const isDragging = ref(false)
 const textareaRef = ref(null)
 const fileInputRef = ref(null)
+
+watch(
+  () => props.draftKey,
+  (key) => {
+    inputText.value = readStorage(key, '')
+    nextTick(autoResize)
+  },
+  { immediate: true }
+)
+
+watch(inputText, (value) => {
+  if (!props.draftKey) return
+  if (value) {
+    writeStorage(props.draftKey, value)
+  } else {
+    removeStorage(props.draftKey)
+  }
+})
 
 function formatFileSize(bytes) {
   if (!bytes) return ''
@@ -149,6 +169,7 @@ function handleSend() {
 
   // 清空输入
   inputText.value = ''
+  removeStorage(props.draftKey)
   removeImage()
   nextTick(() => {
     autoResize()
